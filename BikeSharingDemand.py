@@ -9,7 +9,7 @@ from sklearn.linear_model import LinearRegression, Lasso, LassoLars
 from sklearn.ensemble import ExtraTreesRegressor, GradientBoostingRegressor, RandomForestRegressor, AdaBoostRegressor, BaggingRegressor
 from sklearn.metrics import mean_squared_log_error, r2_score, make_scorer
 from sklearn.model_selection import train_test_split, GridSearchCV  # , cross_val_score, ShuffleSplit
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
 from sklearn.decomposition import PCA
 # from xgboost import XGBRegressor
 from sklearn.svm import SVR
@@ -22,8 +22,8 @@ class BikeSharingDemand:
         # self.visualize_data()
         print('Stage 1: transforming data...')
         self.df_train, self.df_test = self.transform_data(self.df_train, True), self.transform_data(self.df_test, False)
+        # self.visualize_opt_components_number(self.df_train)
         self.debug(self.df_train)
-
         if flag:
             y, X = self.df_train['count'], self.df_train.drop(['count'], axis=1)
             self.local_evaluation(X, y)
@@ -72,17 +72,19 @@ class BikeSharingDemand:
         pca = PCA(n_components=components)
         y = dataframe['count']
         dataframe = dataframe.drop(['count'], axis=1)
-        pca.fit(dataframe)
-        pca_train = pca.transform(dataframe)
-        self.local_evaluation(pca_train, y)
+        X = pca.fit_transform(dataframe)
+        self.local_evaluation(X, y)
 
 # Scaling data
     @staticmethod
-    def standard_scaling(X_train, X_test):
-        scaler = StandardScaler().fit(X_train)
-        X_train = scaler.transform(X_train)
-        X_test = scaler.transform(X_test)
-        return X_train, X_test
+    def standard_scaling(data):
+        scaler = StandardScaler()
+        return scaler.fit_transform(data)
+
+    @staticmethod
+    def robust_scaling(data):
+        scaler = RobustScaler()
+        return scaler.fit_transform(data)
 
 # One-Hot Encoding
     @staticmethod
@@ -98,33 +100,39 @@ class BikeSharingDemand:
 
 # Graphical Representations
     def visualize_data(self):
-        target = ['count']
-        sn.distplot(self.df_train[target[-1]])
+        # humidity quartiles
+        sn.boxplot(x=self.df_train['hum'])
         plt.show()
-        sn.boxplot(x=self.df_train['humidity'])
+        # count quartiles
+        sn.boxplot(x=self.df_train['cnt'])
         plt.show()
-        sn.boxplot(x=self.df_train['count'])
+        # weather quartiles
+        sn.boxplot(x=self.df_train['weathersit'])
         plt.show()
-        sn.boxplot(x=self.df_train['weather'])
-        plt.show()
+        # graphical representation of weather in count
         fig, ax = plt.subplots(figsize=(16, 8))
-        ax.scatter(self.df_train['weather'], self.df_train['count'])
+        ax.scatter(self.df_train['weathersit'], self.df_train['cnt'])
         ax.set_xlabel('weather')
-        ax.set_ylabel('count')
+        ax.set_ylabel('cnt')
         plt.show()
-        sn.distplot(self.df_train['count'])
+        # count distribution
+        sn.distplot(self.df_train['cnt'])
         plt.show()
-        sn.distplot(np.log1p(self.df_train['count']))
+        # log(count) distribution
+        sn.distplot(np.log(self.df_train['cnt']))
         plt.show()
+        # temp, atemp, humidity and windspeed quartiles
         sn.boxplot(data=self.df_train[['temp', 'atemp', 'hum', 'windspeed']])
         fig = plt.gcf()
         fig.set_size_inches(10, 10)
         plt.show()
+        # casual, registered, count quartiles
         sn.boxplot(data=self.df_train[['casual', 'registered', 'cnt']])
         fig = plt.gcf()
         fig.set_size_inches(10, 10)
         plt.show()
 
+        # total boxplots of some important features
         fig, axes = plt.subplots(nrows=2, ncols=2)
         fig.set_size_inches(12, 10)
         sn.boxplot(data=self.df_train, y="cnt", orient="v", ax=axes[0][0])
@@ -155,6 +163,7 @@ class BikeSharingDemand:
         train_preprocessed = df_train.loc[(df_train['count'] >= lower_bound) & (df_train['count'] <= upper_bound)]
         print("Samples in train set without outliers: {}".format(len(train_preprocessed)))
         sn.distplot(train_preprocessed['count'])
+        plt.show()
         return train_preprocessed
 
     def winsorizing(self, df):
@@ -172,22 +181,33 @@ class BikeSharingDemand:
     def rmsle(predicted, actual, size):
         return np.sqrt(np.nansum(np.square(np.log(predicted + 1) - np.log(actual + 1))) / float(size))
 
-# LOCAL PREDICTIONS AND EVALUATION
+    @staticmethod
+    def rmsle2(y, y_, convertExp=True):
+        if convertExp:
+            y = np.exp(y),
+            y_ = np.exp(y_)
+        log1 = np.nan_to_num(np.array([np.log(v + 1) for v in y]))
+        log2 = np.nan_to_num(np.array([np.log(v + 1) for v in y_]))
+        calc = (log1 - log2) ** 2
+        return np.sqrt(np.mean(calc))
+
+    # LOCAL PREDICTIONS AND EVALUATION
     def local_evaluation(self, X, y):
         print('Stage 2: performing one_hot encoding...')
         X = self.one_hot_encoding('weather', self.one_hot_encoding('season', self.one_hot_encoding('year', self.one_hot_encoding('month', X))))
         X.drop(['season', 'weather', 'year', 'month'], inplace=True, axis=1)
-        self.debug(X)
+        # self.debug(X)
         self.final_model(X, y)
-        print("\n\nModels that produced best results using GridSearchCV to tune parameters and one-hot encoding : \n")
+        print("\n\nModels that produced best results using GridSearchCV to tune parameters, one-hot encoding and log transformation : \n")
         self.best_model_scores(X, y)
-        # self.rest_model_scores(X, y)
+        print("\nRest of the results using GridSearchCV to tune parameters, one-hot encoding and log transformation: \n")
+        self.rest_model_scores(X, y)
 
     def final_model(self, X, y):
         print('Stage 3: fitting best models...')
         bagging_base_tree = DecisionTreeRegressor(ccp_alpha=0.0, criterion='mse', min_samples_leaf=1, min_samples_split=2, splitter='best')
-        model1 = ExtraTreesRegressor(bootstrap=False, max_features='auto', n_estimators=3000, max_depth=5000, min_samples_split=5)
-        model2 = RandomForestRegressor(bootstrap=True, max_features='auto', n_estimators=2000, max_depth=5000, max_leaf_nodes=None, min_samples_leaf=1, min_samples_split=2, n_jobs=2)  # RandomForestRegressor(n_estimators=500, n_jobs=-1, max_features='auto')
+        model1 = ExtraTreesRegressor(bootstrap=False, max_features='auto', n_estimators=3000, max_depth=None, min_samples_split=5)
+        model2 = RandomForestRegressor(bootstrap=True, max_features='auto', n_estimators=2000, max_depth=None, max_leaf_nodes=None, min_samples_leaf=1, min_samples_split=2, n_jobs=2)  # RandomForestRegressor(n_estimators=500, n_jobs=-1, max_features='auto')
         model3 = BaggingRegressor(base_estimator=bagging_base_tree, n_estimators=2000, bootstrap=True, bootstrap_features=False, max_features=1.0, max_samples=1.0, n_jobs=None)
         # metamodel = BaggingRegressor(base_estimator=bagging_base_tree, n_estimators=1000, bootstrap=True, bootstrap_features=False, max_features=1.0, max_samples=1.0, n_jobs=None)
         # regressors = [('rf', model2), ('et', model1)]
@@ -207,68 +227,56 @@ class BikeSharingDemand:
     def best_model_scores(X, y):
         x_train, x_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         bagging_base_tree = DecisionTreeRegressor(ccp_alpha=0.0, criterion='mse', min_samples_leaf=1, min_samples_split=2, splitter='best')
-        models = [RandomForestRegressor(bootstrap=True, max_features='auto', n_estimators=2000, max_depth=1000, max_leaf_nodes=None, min_samples_leaf=1, min_samples_split=2, n_jobs=2),  # (n_estimators=500, n_jobs=-1, max_features='auto')
-                  ExtraTreesRegressor(bootstrap=False, max_features='auto', n_estimators=3000, max_depth=1000, min_samples_split=5),  # (max_features='auto', n_estimators=300)
-                  ExtraTreeRegressor(ccp_alpha=0.008, splitter='best', random_state=96, max_features='auto', min_samples_leaf=6, min_samples_split=3),
-                  BaggingRegressor(base_estimator=bagging_base_tree, n_estimators=1000, bootstrap=True, bootstrap_features=False, max_features=1.0, max_samples=1.0, n_jobs=None),
-                  KNeighborsRegressor(n_jobs=-1, n_neighbors=6)]
-        model_names = ['RandomForestRegressor', 'ExtraTreesRegressor', 'ExtraTreeRegressor', 'Bagging(D.T.)Regressor', 'KNeighborsRegressor']
+        adaboost_base_tree = bagging_base_tree
+        models = [RandomForestRegressor(bootstrap=True, max_features='auto', n_estimators=2000, max_depth=None, max_leaf_nodes=None, min_samples_leaf=1, min_samples_split=2, n_jobs=2),
+                  ExtraTreesRegressor(bootstrap=False, max_features='auto', n_estimators=3000, max_depth=None, min_samples_split=5),
+                  BaggingRegressor(base_estimator=bagging_base_tree, n_estimators=2000, bootstrap=True, bootstrap_features=False, max_features=1.0, max_samples=1.0, n_jobs=None),
+                  AdaBoostRegressor(base_estimator=adaboost_base_tree, learning_rate=0.01, n_estimators=2000),
+                  GradientBoostingRegressor(n_estimators=1000, min_samples_split=2, tol=0.00001, learning_rate=0.01)]
+        model_names = ['RandomForest ', 'ExtraTrees ', 'Bagging(D.T.)', 'AdaBoost(D.T.)', 'GradientBoost ']
         rmsle = []
         r2 = []
         for model in range(len(models)):
             regressor = models[model]
-            # x_train, x_test = self.standard_scaling(x_train, x_test)
-            regressor.fit(X=x_train, y=np.log1p(y_train))
+            regressor.fit(X=x_train, y=np.log(y_train))
             predictions = np.exp(regressor.predict(X=x_test))
             for i, y in enumerate(predictions):
                 if predictions[i] < 0:
                     predictions[i] = 0
             rmsle.append(np.sqrt(mean_squared_log_error(y_test, predictions)))
             r2.append(r2_score(y_test, predictions))
-        d = pd.DataFrame({'Model': model_names, 'RMSLE': rmsle, 'r2': r2}).sort_values('RMSLE')
-        print(d.reset_index(drop=True))
-        sn.factorplot(y='Modelling Algo', x='RMSLE', data=d.drop(['r2'], axis=1), kind='bar', size=5, aspect=2)
-        plt.show()
+        d = pd.DataFrame({'Regression Model': model_names, 'RMSLE': rmsle, 'r2': r2}).sort_values('RMSLE').reset_index(drop=True)
+        d.index += 1
+        print(d)
 
 # Other Tested Models (produced bad results)
     @staticmethod
     def rest_model_scores(X, y):
         x_train, x_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        adaboost_base_tree = DecisionTreeRegressor(ccp_alpha=0.0, criterion='mse', min_samples_leaf=1, min_samples_split=2, splitter='best', max_depth=3)
+        adaboost_base_tree = DecisionTreeRegressor(ccp_alpha=0.0, criterion='mse', min_samples_leaf=1, min_samples_split=2, splitter='best')
         models = [
                     SVR(gamma=0.0001, C=1.0, epsilon=0.2, kernel='linear'),
-                    AdaBoostRegressor(n_estimators=300, learning_rate=0.01),
-                    LassoLars(normalize=False, copy_X=True, alpha=0.02),
-                    GradientBoostingRegressor(n_estimators=300, min_samples_split=2, tol=0.00001, learning_rate=0.01),
-                    AdaBoostRegressor(base_estimator=adaboost_base_tree, learning_rate=0.01, n_estimators=300),
+                    LassoLars(normalize=False, copy_X=True, alpha=0.0009),
                     LinearRegression(normalize=True),
-                    Lasso(alpha=0.02)
+                    Lasso(alpha=0.001, copy_X=True, precompute=True, selection='random'),
+                    ExtraTreeRegressor(ccp_alpha=0.008, splitter='best', random_state=96, max_features='auto', min_samples_leaf=6, min_samples_split=3),
+                    KNeighborsRegressor(n_jobs=-1, n_neighbors=6)
                   ]
-        model_names = ['SVR', 'AdaBoostRegressor', 'LassoLeastAngleRegressor', 'GradientBoostRegressor', 'AdaBoost(D.T.)Regressor', 'LinearRegressor', 'LassoRegressor']
+        model_names = ['SVR', 'LassoLeastAngle', 'Linear', 'Lasso', 'ExtraTree', 'KNeighbors']
         rmsle = []
         r2 = []
         for model in range(len(models)):
             regressor = models[model]
-            regressor.fit(x_train, y_train)
-            predictions = regressor.predict(x_test)
+            regressor.fit(x_train, np.log(y_train))
+            predictions = np.exp(regressor.predict(x_test))
             for i, y in enumerate(predictions):
                 if predictions[i] < 0:
                     predictions[i] = 0
             rmsle.append(np.sqrt(mean_squared_log_error(y_test, predictions)))
             r2.append(r2_score(y_test, predictions))
-        d = pd.DataFrame({'Model': model_names, 'RMSLE': rmsle, 'r2': r2}).sort_values('RMSLE')
-        print("\nBelow we present the rest of the results using GridSearchCV to tune parameters and one-hot encoding: \n")
+        d = pd.DataFrame({'Regression Model': model_names, 'RMSLE': rmsle, 'r2': r2}).sort_values('RMSLE').reset_index(drop=True)
+        d.index += 1
         print(d)
-
-    @staticmethod
-    def rmsle2(y, y_, convertExp=True):
-        if convertExp:
-            y = np.exp(y),
-            y_ = np.exp(y_)
-        log1 = np.nan_to_num(np.array([np.log(v + 1) for v in y]))
-        log2 = np.nan_to_num(np.array([np.log(v + 1) for v in y_]))
-        calc = (log1 - log2) ** 2
-        return np.sqrt(np.mean(calc))
 
 # FINAL PREDICTIONS
     def kaggle_submission(self):
@@ -276,21 +284,20 @@ class BikeSharingDemand:
 
         # one hot encoding
         print('Stage 2: performing one_hot encoding...')
-        X = self.one_hot_encoding('weather', self.one_hot_encoding('season', self.one_hot_encoding('year', self.one_hot_encoding('month', X))))
-        X_test = self.one_hot_encoding('weather', self.one_hot_encoding('season', self.one_hot_encoding('year', self.one_hot_encoding('month', self.df_test))))  # self.one_hot_encoding('weather', self.one_hot_encoding('season', X)), self.one_hot_encoding('weather', self.one_hot_encoding('season', self.df_test))
+        X = self.one_hot_encoding('weather', self.one_hot_encoding('season', self.one_hot_encoding('year', self.one_hot_encoding('month',  X))))
+        X_test = self.one_hot_encoding('weather', self.one_hot_encoding('season', self.one_hot_encoding('year', self.one_hot_encoding('month',  self.df_test))))  # self.one_hot_encoding('weather', self.one_hot_encoding('season', X)), self.one_hot_encoding('weather', self.one_hot_encoding('season', self.df_test))
         X.drop(['season', 'weather', 'year', 'month'], inplace=True, axis=1)
         X_test = self.fill_missing_column(X_test)
         X_test.drop(['season', 'weather', 'year', 'month'], inplace=True, axis=1)
         self.debug(X)
         self.debug(X_test)
+
         # model
         print('Stage 3: fitting best models...')
         bagging_base_tree = DecisionTreeRegressor(ccp_alpha=0.0, criterion='mse', min_samples_leaf=1, min_samples_split=2, splitter='best')
-        model1 = ExtraTreesRegressor(bootstrap=False, max_features='auto', n_estimators=3000, max_depth=1000, min_samples_split=5)
-        model2 = RandomForestRegressor(bootstrap=True, max_features='auto', n_estimators=2000, max_depth=1000, max_leaf_nodes=None, min_samples_leaf=1, min_samples_split=2, n_jobs=2)
+        model1 = ExtraTreesRegressor(bootstrap=False, max_features='auto', n_estimators=3000, max_depth=None, min_samples_split=5)
+        model2 = RandomForestRegressor(bootstrap=True, max_features='auto', n_estimators=2000, max_depth=None, max_leaf_nodes=None, min_samples_leaf=1, min_samples_split=2, n_jobs=2)
         model3 = BaggingRegressor(base_estimator=bagging_base_tree, n_estimators=2000, bootstrap=True, bootstrap_features=False, max_features=1.0, max_samples=1.0, n_jobs=None)
-        # model1 = self.use_GridSearch_CrossValidation(model1, X, X_test, y)
-        # model2 = self.use_GridSearch_CrossValidation(model2, X, X_test, y)
         # regressors = [('rf', model2), ('et', model1)]
         # model = StackingRegressor(estimators=regressors)
         # best_estimator = self.use_GridSearch_CrossValidation(model, X, X_test, y)
@@ -298,6 +305,7 @@ class BikeSharingDemand:
         model1.fit(X=X, y=np.log(y))
         model2.fit(X=X, y=np.log(y))
         model3.fit(X=X, y=np.log(y))
+
         print('Stage 4: assigning weights on each prediction and combining them for final prediction...')
         predictions = (np.exp(model1.predict(X=X_test)) * 0.6) + (np.exp(model2.predict(X=X_test)) * 0.28) + (np.exp(model3.predict(X=X_test)) * 0.12)
         for i, y in enumerate(predictions):
@@ -307,7 +315,7 @@ class BikeSharingDemand:
 
     def use_GridSearch_CrossValidation(self, model, X, X_test, y):
         scorer = self.make_scorer_for_GridSearch()
-        paramgrid = {}  # params
+        paramgrid = {'n_estimators': [100, 200, 300]}  # params
         grid_search = GridSearchCV(estimator=model, param_grid=paramgrid, scoring=scorer, cv=10, n_jobs=2)
         X, X_test = self.standard_scaling(X, X_test)
         grid_search.fit(X=X, y=y)
@@ -334,7 +342,8 @@ class BikeSharingDemand:
         print('R2:', r2_score(y_test, predictions))
 
 
-print("\nrun Local or Kaggle Evaluation?\n ")
+print("\n\n --Make sure to create a folder \"KaggleSubmission\" in the current working directory--\n\n\n")
+print("run Local or Kaggle Evaluation?\n ")
 in_put = input("1: Local Evaluation\n2: Kaggle Evaluation\n")
 if in_put is '1':
     regression = BikeSharingDemand('datasets\\train.csv', 'datasets\\test.csv', True)
